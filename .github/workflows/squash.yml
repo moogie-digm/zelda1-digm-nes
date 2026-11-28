@@ -1,0 +1,70 @@
+name: Squash Consecutive Author Commits
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Branch to squash commits on'
+        required: true
+        default: 'luajit'
+      commit_message:
+        description: 'Optional custom commit message (defaults to first commit message in streak)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  squash-commits:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target branch with full history
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_branch }}
+          fetch-depth: 0
+
+      - name: Squash consecutive commits by the latest author
+        env:
+          CUSTOM_MSG: ${{ github.event.inputs.commit_message }}
+          TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
+        run: |
+          LATEST_AUTHOR_EMAIL=$(git log -1 --format='%ae')
+          LATEST_AUTHOR_NAME=$(git log -1 --format='%an')
+
+          # Preserve the original author's identity on the squashed commit
+          git config user.name "$LATEST_AUTHOR_NAME"
+          git config user.email "$LATEST_AUTHOR_EMAIL"
+
+          # Find the first commit moving backward that is NOT by the latest author
+          BASE_COMMIT=$(git log --format='%H %ae' | awk -v auth="$LATEST_AUTHOR_EMAIL" '$2 != auth {print $1; exit}')
+
+          # Count commits and find the FIRST (oldest) commit in the author's streak
+          if [ -z "$BASE_COMMIT" ]; then
+            COMMIT_COUNT=$(git rev-list --count HEAD)
+            FIRST_COMMIT=$(git rev-list --max-parents=0 HEAD | tail -n 1)
+          else
+            COMMIT_COUNT=$(git rev-list --count "${BASE_COMMIT}..HEAD")
+            FIRST_COMMIT=$(git rev-list --reverse "${BASE_COMMIT}..HEAD" | head -n 1)
+          fi
+
+          if [ "$COMMIT_COUNT" -le 1 ]; then
+            echo "Only 1 consecutive commit by ${LATEST_AUTHOR_NAME}. Nothing to squash."
+            exit 0
+          fi
+
+          FIRST_MSG=$(git log -1 --format='%B' "$FIRST_COMMIT")
+          MSG="${CUSTOM_MSG:-$FIRST_MSG}"
+
+          if [ -z "$BASE_COMMIT" ]; then
+            git checkout --orphan temp-squash-branch
+            git commit -m "$MSG"
+            git branch -M "$TARGET_BRANCH"
+          else
+            git reset --soft "$BASE_COMMIT"
+            git commit -m "$MSG"
+          fi
+
+          git push --force-with-lease origin "HEAD:refs/heads/${TARGET_BRANCH}"
+          echo "Successfully squashed ${COMMIT_COUNT} commits into 1 using message from ${FIRST_COMMIT}."

@@ -1,0 +1,162 @@
+-- Smooth opening curtain scroll
+
+
+
+-- usa-10		7:ebaf		UpdateMode3Unfurl
+-- jpn			7:ebe1
+
+local aob = {
+	'20 ? ?',		-- jsr UpdateWorldCurtain
+	'a5 7c',		-- lda ObjX+12
+
+	'$ d0 ?',		-- bne x  <-- curtain scroll done below
+	'a9 0f',		-- lda #$0f
+	'20 ? ?',		-- jsr SetMMC1Control
+}
+
+local list = { '10 ?' }		-- bpl = 1 extra edge column
+
+rom_patch4(0x1ebaf, aob, list)
+
+
+
+
+local curtain_valid = false
+
+
+local curtain_open = function()
+
+if curtain_valid then return end
+
+
+
+-- usa-10		w:7248		UpdateWorldCurtainEffect
+-- jpn			w:724a
+
+local aob = {
+	'$ a5 28',		-- lda $28		<-- tick counter
+	'd0 ?',			-- bne @exit
+	'a9 01',		-- lda #$01
+	'85 0a',		-- sta $0a
+}
+
+local _hook = wram_hook2(0x7248, aob)
+
+
+
+if _hook then
+	curtain_valid = true
+
+
+	local _pc, _addr, _aob = _hook.pc, _hook.addr, _hook.aob
+
+
+	local mask = {
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,		-- 8px black bar, color 3-3
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+
+		0xfc, 0xfc, 0xfc, 0xfc, 0xfc, 0xfc, 0xfc, 0xfc,		-- 6px
+		0xfc, 0xfc, 0xfc, 0xfc, 0xfc, 0xfc, 0xfc, 0xfc,
+		0xfc, 0xfc, 0xfc, 0xfc, 0xfc, 0xfc, 0xfc, 0xfc,
+		0xfc, 0xfc, 0xfc, 0xfc, 0xfc, 0xfc, 0xfc, 0xfc,
+
+		0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xf0,		-- 4px
+		0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xf0,
+		0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xf0,
+		0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xf0, 0xf0,
+
+		0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0,		-- 2px
+		0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0,
+		0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0,
+		0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0, 0xc0,
+
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,		-- 0px
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	}
+
+	local mask_c = UINT8(mask)
+	local mask_open = { 0xc8, 0xc8, 0xc6, 0xc4, 0xc2 }		-- sprite mask
+
+
+	local state = 0
+
+
+
+	local prefn = function()
+		local tick = ram[0x28]
+		local left = ram[0x7c]		-- left column
+		local right = ram[0x7d]		-- right column
+
+
+		if state == 0 then
+			if left == 0 and tick == 0 then
+				-- hle vblank: hide sprites due to chr page change
+				memset(ram + 0x280, 0xf8, 11*8)
+				ppu.dma()
+
+
+				local ptr = ppu.get_chrpage(ram[0x7f])
+				ppu.set_chrpage(0xc00, ptr)
+
+
+				ram[0x7c] -= 1		-- end tile loop
+				cpu.rts()			-- don't upload junk tiles
+				return
+
+			elseif left == 0x10 then	-- center column
+				ram[0x7f] = ppu.chrbank(0xc00)		-- cache page into unused boomerang xpos
+
+
+				-- hle: use hud split to transfer
+				ppu.pal[0x1f] = 0x0f	-- black	[curtain ending flushes palette anyway]
+			end
+
+
+			cpu.jsr( _pc, _pc )		-- tail hook recursion
+			state = 1
+
+		elseif state == 1 then
+			-- warn: mmc1 nametable write resets chrpage 0-3
+
+			state = 2	-- normal operation
+
+		elseif state == 2 then
+			ppu.set_chrpage(0xc00, mask_c)		-- curtain tiles
+
+
+			local spr = 0x280	-- oam
+			local tile = mask_open[ tick ]		-- timer
+
+
+			for row = 1,11 do
+				ram[spr+0] = 48+row*16-1	-- 8x16 sprite column with -1 y-offset
+				ram[spr+1] = tile
+				ram[spr+2] = 0x03			-- palette 3
+				ram[spr+3] = left*8
+
+				ram[spr+4] = 48+row*16-1
+				ram[spr+5] = tile
+				ram[spr+6] = 0x40 | 0x03	-- flip-h
+				ram[spr+7] = (right-2)*8
+
+				spr += 8
+			end
+
+
+			cpu.rts()		-- tail hook done
+			state = 0
+		end
+	end
+
+
+	pc_hook( _pc, 0, wram_cond(_addr, _aob), prefn)
+end
+
+end		-- curtain_overlay
+
+
+wram_overlays.add(curtain_open)
